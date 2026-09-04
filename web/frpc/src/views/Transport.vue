@@ -140,6 +140,8 @@
 </template>
 
 <script setup lang="ts">
+defineOptions({ name: 'TransportView' })
+
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
