@@ -63,9 +63,13 @@ func ForwardUserConn(udpConn *net.UDPConn, readCh <-chan *msg.UDPPacket, sendCh 
 		// NewUDPPacket copies buf[:n], so the read buffer can be reused
 		udpMsg := NewUDPPacket(buf[:n], nil, remoteAddr)
 
-		select {
-		case sendCh <- udpMsg:
-		default:
+		if err = errors.PanicToError(func() {
+			select {
+			case sendCh <- udpMsg:
+			default:
+			}
+		}); err != nil {
+			return
 		}
 	}
 }
@@ -140,6 +144,8 @@ func Forwarder(dstAddr *net.UDPAddr, readCh <-chan *msg.UDPPacket, sendCh chan<-
 			_, err = udpConn.Write(buf)
 			if err != nil {
 				udpConn.Close()
+			} else {
+				_ = udpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			}
 
 			if !ok {

@@ -47,6 +47,8 @@ type ProxyStats struct {
 	TodayTrafficOut int64
 	LastStartTime   string
 	LastCloseTime   string
+	LastStartAt     int64
+	LastCloseAt     int64
 	CurConns        int64
 }
 
@@ -98,4 +100,5 @@ type Collector interface {
 	GetProxyByName(proxyName string) *ProxyStats
 	GetProxyTraffic(name string) *ProxyTrafficInfo
 	ClearOfflineProxies() (int, int)
+	PruneOfflineProxies() (int, int)
 }

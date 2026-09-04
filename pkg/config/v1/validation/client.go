@@ -51,12 +51,49 @@ func (v *ConfigValidator) ValidateClientCommonConfig(c *v1.ClientCommonConfig) (
 }
 
 func validateFeatureGates(c *v1.ClientCommonConfig) (Warning, error) {
+	gates := featuregate.NewFeatureGate()
+	if err := gates.SetFromMap(c.FeatureGates); err != nil {
+		return nil, err
+	}
+
 	if c.VirtualNet.Address != "" {
-		if !featuregate.Enabled(featuregate.VirtualNet) {
+		if !gates.Enabled(featuregate.VirtualNet) {
 			return nil, fmt.Errorf("VirtualNet feature is not enabled; enable it by setting the appropriate feature gate flag")
 		}
 	}
 	return nil, nil
+}
+
+// ClientConfigRequirements describes runtime capabilities needed by a client configuration.
+type ClientConfigRequirements struct {
+	VirtualNet bool
+}
+
+// GetClientConfigRequirements returns the runtime capabilities needed by a client configuration.
+func GetClientConfigRequirements(
+	common *v1.ClientCommonConfig,
+	proxyCfgs []v1.ProxyConfigurer,
+	visitorCfgs []v1.VisitorConfigurer,
+) ClientConfigRequirements {
+	requirements := ClientConfigRequirements{}
+	if common != nil && common.VirtualNet.Address != "" {
+		requirements.VirtualNet = true
+	}
+	for _, cfg := range proxyCfgs {
+		if cfg.GetBaseConfig().Plugin.Type == v1.PluginVirtualNet {
+			requirements.VirtualNet = true
+			break
+		}
+	}
+	if !requirements.VirtualNet {
+		for _, cfg := range visitorCfgs {
+			if cfg.GetBaseConfig().Plugin.Type == v1.VisitorPluginVirtualNet {
+				requirements.VirtualNet = true
+				break
+			}
+		}
+	}
+	return requirements
 }
 
 func (v *ConfigValidator) validateAuthConfig(c *v1.AuthClientConfig) (Warning, error) {
@@ -68,22 +105,7 @@ func (v *ConfigValidator) validateAuthConfig(c *v1.AuthClientConfig) (Warning, e
 		errs = AppendError(errs, fmt.Errorf("invalid auth additional scopes, optional values are %v", SupportedAuthAdditionalScopes))
 	}
 
-	// Validate token/tokenSource mutual exclusivity
-	if c.Token != "" && c.TokenSource != nil {
-		errs = AppendError(errs, fmt.Errorf("cannot specify both auth.token and auth.tokenSource"))
-	}
-
-	// Validate tokenSource if specified
-	if c.TokenSource != nil {
-		if c.TokenSource.Type == "exec" {
-			if err := v.ValidateUnsafeFeature(security.TokenSourceExec); err != nil {
-				errs = AppendError(errs, err)
-			}
-		}
-		if err := c.TokenSource.Validate(); err != nil {
-			errs = AppendError(errs, fmt.Errorf("invalid auth.tokenSource: %v", err))
-		}
-	}
+	errs = AppendError(errs, v.validateAuthTokenSource(c.Token, c.TokenSource))
 
 	if err := v.validateOIDCConfig(&c.OIDC); err != nil {
 		errs = AppendError(errs, err)

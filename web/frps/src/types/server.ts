@@ -1,5 +1,10 @@
 export interface ServerInfo {
   version: string
+  config: ServerInfoConfig
+  status: ServerInfoStatus
+}
+
+export interface ServerInfoConfig {
   bindPort: number
   vhostHTTPPort: number
   vhostHTTPSPort: number
@@ -15,8 +20,9 @@ export interface ServerInfo {
   transportProtocol: string
   autoTransportEnabled: boolean
   autoTransportProtocols?: string[]
+}
 
-  // Stats
+export interface ServerInfoStatus {
   totalTrafficIn: number
   totalTrafficOut: number
   curConns: number

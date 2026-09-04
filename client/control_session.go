@@ -114,6 +114,7 @@ func (d *controlSessionDialer) Dial(previousRunID string) (*SessionContext, erro
 		Connector:      newMessageConnector(connector, common.Transport.WireProtocol),
 		VnetController: d.vnetController,
 		AutoTransport:  d.autoTransport,
+		UDPPacketCodec: loginResult.udpPacketCodec,
 	}, nil
 }
 
@@ -142,8 +143,9 @@ func (d *controlSessionDialer) buildLoginMsg(common *v1.ClientCommonConfig, prev
 }
 
 type loginExchangeResult struct {
-	resp   *msg.LoginResp
-	crypto *wire.CryptoContext
+	resp           *msg.LoginResp
+	crypto         *wire.CryptoContext
+	udpPacketCodec string
 }
 
 func (d *controlSessionDialer) exchangeLogin(
@@ -204,6 +206,7 @@ func (d *controlSessionDialer) exchangeLogin(
 	}()
 
 	var cryptoContext *wire.CryptoContext
+	var udpPacketCodec string
 	if wireConn != nil {
 		serverHelloFrame, err := wireConn.ReadFrame()
 		if err != nil {
@@ -223,6 +226,7 @@ func (d *controlSessionDialer) exchangeLogin(
 		if err != nil {
 			return nil, err
 		}
+		udpPacketCodec = serverHello.Selected.Message.UDPPacketCodec
 	}
 
 	var loginRespMsg msg.LoginResp
@@ -230,8 +234,9 @@ func (d *controlSessionDialer) exchangeLogin(
 		return nil, err
 	}
 	return &loginExchangeResult{
-		resp:   &loginRespMsg,
-		crypto: cryptoContext,
+		resp:           &loginRespMsg,
+		crypto:         cryptoContext,
+		udpPacketCodec: udpPacketCodec,
 	}, nil
 }
 

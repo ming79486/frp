@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,7 +160,7 @@ webServer.port = %d
 		framework.NewRequestExpect(f).PortName(portName).Ensure()
 	})
 
-	ginkgo.It("baseline frps rejects current frpc forced to v2", func() {
+	ginkgo.It("baseline frps handles current frpc forced to v2 according to baseline support", func() {
 		portName := port.GenName("CompatBaselineFRPSForcedV2")
 		clientConf := tcpClientConfig("tcp", portName, `
 transport.wireProtocol = "v2"
@@ -170,8 +172,58 @@ transport.wireProtocol = "v2"
 			consts.DefaultServerConfig,
 			[]string{clientConf},
 		)
+
+		// frp v0.69.0 added control connection wireProtocol v2 support, so
+		// baseline frps v0.69.0 and newer should accept a current frpc forced
+		// to v2. Older known baselines still must reject the unsupported protocol.
+		// For custom baselines, the version is unknown and the binary may be either
+		// side of the support boundary, so this versioned expectation is skipped.
+		supportsV2, knownVersion := baselineSupportsControlWireProtocolV2(compatCtx.BaselineVersion)
+		if !knownVersion {
+			ginkgo.Skip(fmt.Sprintf("baseline version %q is not semver; skip versioned forced-v2 expectation", compatCtx.BaselineVersion))
+		}
+		if supportsV2 {
+			framework.NewRequestExpect(f).PortName(portName).Ensure()
+			return
+		}
+
 		expectProcessExit(clientProcesses[0], 5*time.Second)
 		framework.NewRequestExpect(f).PortName(portName).ExpectError(true).Ensure()
+	})
+})
+
+var _ = ginkgo.Describe("[Compatibility: BinaryUDPPacket]", func() {
+	f := framework.NewDefaultFramework()
+
+	ginkgo.BeforeEach(func() {
+		supportsV2, knownVersion := baselineSupportsControlWireProtocolV2(compatCtx.BaselineVersion)
+		if !knownVersion || !supportsV2 {
+			ginkgo.Skip(fmt.Sprintf("baseline version %q does not have known wire protocol v2 support", compatCtx.BaselineVersion))
+		}
+	})
+
+	ginkgo.It("current frps falls back to JSON for baseline frpc", func() {
+		portName := port.GenName("CompatBinaryUDPBaselineFRPC")
+		clientConf := udpClientConfig("udp", portName, `transport.wireProtocol = "v2"`)
+		f.RunProcessesWithBinaries(
+			compatCtx.CurrentFRPSPath,
+			compatCtx.BaselineFRPCPath,
+			consts.DefaultServerConfig,
+			[]string{clientConf},
+		)
+		framework.NewRequestExpect(f).Protocol("udp").PortName(portName).Ensure()
+	})
+
+	ginkgo.It("current frpc falls back to JSON for baseline frps", func() {
+		portName := port.GenName("CompatBinaryUDPBaselineFRPS")
+		clientConf := udpClientConfig("udp", portName, `transport.wireProtocol = "v2"`)
+		f.RunProcessesWithBinaries(
+			compatCtx.BaselineFRPSPath,
+			compatCtx.CurrentFRPCPath,
+			consts.DefaultServerConfig,
+			[]string{clientConf},
+		)
+		framework.NewRequestExpect(f).Protocol("udp").PortName(portName).Ensure()
 	})
 })
 
@@ -191,12 +243,61 @@ remotePort = {{ .%s }}
 `, consts.PortServerName, extra, proxyName, framework.TCPEchoServerPort, remotePortName)
 }
 
+func udpClientConfig(proxyName string, remotePortName string, extra string) string {
+	return fmt.Sprintf(`
+serverAddr = "127.0.0.1"
+serverPort = {{ .%s }}
+loginFailExit = true
+log.level = "trace"
+%s
+
+[[proxies]]
+name = "%s"
+type = "udp"
+localPort = {{ .%s }}
+remotePort = {{ .%s }}
+`, consts.PortServerName, extra, proxyName, framework.UDPEchoServerPort, remotePortName)
+}
+
 func expectProcessExit(p *process.Process, timeout time.Duration) {
 	select {
 	case <-p.Done():
 	case <-time.After(timeout):
 		framework.Failf("process did not exit within %s; output:\n%s", timeout, p.Output())
 	}
+}
+
+func baselineSupportsControlWireProtocolV2(version string) (supports bool, known bool) {
+	version = strings.TrimPrefix(version, "v")
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return false, false
+	}
+
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false, false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false, false
+	}
+	patch, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return false, false
+	}
+
+	return compareSemanticVersion(major, minor, patch, 0, 69, 0) >= 0, true
+}
+
+func compareSemanticVersion(major, minor, patch int, baseMajor, baseMinor, basePatch int) int {
+	if major != baseMajor {
+		return major - baseMajor
+	}
+	if minor != baseMinor {
+		return minor - baseMinor
+	}
+	return patch - basePatch
 }
 
 type wireClientInfo struct {
