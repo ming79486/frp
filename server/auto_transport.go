@@ -72,15 +72,9 @@ func (svr *Service) autoTransportEndpoints() []msg.TransportEndpoint {
 		if port <= 0 || !has(protocol) {
 			return
 		}
-		addr := cfg.BindAddr
-		if ip := net.ParseIP(addr); ip != nil && (ip.IsUnspecified() || ip.IsLoopback()) {
-			addr = ""
-		} else if addr == "0.0.0.0" || addr == "::" || addr == "[::]" || addr == "127.0.0.1" || addr == "::1" || addr == "[::1]" {
-			addr = ""
-		}
 		endpoints = append(endpoints, msg.TransportEndpoint{
 			Protocol: protocol,
-			Addr:     addr,
+			Addr:     "",
 			Port:     port,
 			Enabled:  true,
 		})

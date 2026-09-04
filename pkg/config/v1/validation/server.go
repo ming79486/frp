@@ -66,6 +66,26 @@ func (v *ConfigValidator) ValidateServerConfig(c *v1.ServerConfig) (Warning, err
 		if err := validateProtocolList("transport.auto.advertiseProtocols", c.Transport.Auto.AdvertiseProtocols); err != nil {
 			errs = AppendError(errs, err)
 		}
+		hasActiveListener := false
+		for _, proto := range c.Transport.Auto.AdvertiseProtocols {
+			switch proto {
+			case v1.TransportProtocolTCP, v1.TransportProtocolWebsocket, v1.TransportProtocolWSS:
+				if c.BindPort > 0 {
+					hasActiveListener = true
+				}
+			case v1.TransportProtocolKCP:
+				if c.KCPBindPort > 0 {
+					hasActiveListener = true
+				}
+			case v1.TransportProtocolQUIC:
+				if c.QUICBindPort > 0 {
+					hasActiveListener = true
+				}
+			}
+		}
+		if !hasActiveListener {
+			errs = AppendError(errs, fmt.Errorf("transport.auto.advertiseProtocols must contain at least one protocol with an active listener port"))
+		}
 		if c.Transport.Auto.SwitchCooldownSec < 0 {
 			errs = AppendError(errs, fmt.Errorf("transport.auto.switchCooldownSec must be non-negative"))
 		}

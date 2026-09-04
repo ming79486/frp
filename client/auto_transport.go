@@ -114,6 +114,9 @@ type autoTransportManager struct {
 	failures         map[string]int
 	blacklistUntil   map[string]time.Time
 
+	serverAutoEnabled    bool
+	advertisedTransports []string
+
 	lastHeartbeatRTT       time.Duration
 	avgHeartbeatRTT        time.Duration
 	baselineHeartbeatRTT   time.Duration
@@ -206,15 +209,24 @@ func (m *autoTransportManager) selectTransport(ctx context.Context, reason strin
 		return nil, errors.New(serverHello.Error)
 	}
 	if serverHello.ServerAutoVersion != msg.AutoTransportVersion {
+		m.serverAutoEnabled = false
 		m.lastError = fmt.Sprintf("unsupported server auto transport version %d", serverHello.ServerAutoVersion)
 		log.Warnf("auto transport: %s, fallback to static tcp", m.lastError)
 		return m.staticFallbackSelection(), nil
 	}
 	m.state = autoTransportStateNegotiating
 	if serverHello.ProtocolMode != v1.TransportProtocolAuto || !serverHello.AutoEnabled {
+		m.serverAutoEnabled = false
 		log.Infof("auto transport: server mode [%s] autoEnabled [%v], fallback to static tcp",
 			serverHello.ProtocolMode, serverHello.AutoEnabled)
 		return m.staticFallbackSelection(), nil
+	}
+	m.serverAutoEnabled = true
+	m.advertisedTransports = make([]string, 0, len(serverHello.Transports))
+	for _, ep := range serverHello.Transports {
+		if ep.Enabled {
+			m.advertisedTransports = append(m.advertisedTransports, ep.Protocol)
+		}
 	}
 
 	candidates := m.expandCandidatesByResolvedAddr(ctx, m.buildCandidates(serverHello))
@@ -763,7 +775,7 @@ func (m *autoTransportManager) shouldRecheck() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.state != autoTransportStateConnected || m.selected == nil || !m.lastDynamic {
+	if m.state != autoTransportStateConnected || m.selected == nil || !m.serverAutoEnabled {
 		return false
 	}
 	if !m.selectedAt.IsZero() && time.Since(m.selectedAt) < time.Duration(m.common.Transport.Auto.StickyDurationSec)*time.Second {
@@ -773,6 +785,12 @@ func (m *autoTransportManager) shouldRecheck() bool {
 	for proto, until := range m.blacklistUntil {
 		if now.After(until) {
 			delete(m.blacklistUntil, proto)
+			return true
+		}
+	}
+	// Check if a higher-priority candidate was restored or available on server
+	if len(m.common.Transport.Auto.Candidates) > 0 && m.selected.Protocol != m.common.Transport.Auto.Candidates[0] {
+		if len(m.advertisedTransports) > 0 && slices.Contains(m.advertisedTransports, m.common.Transport.Auto.Candidates[0]) {
 			return true
 		}
 	}

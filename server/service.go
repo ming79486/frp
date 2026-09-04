@@ -109,6 +109,7 @@ type Service struct {
 	// Track last transport and switch times per client runID with bounded lifecycle
 	transportSwitchMu      sync.Mutex
 	transportSwitchRecords map[string]transportSwitchRecord
+	lastPruneSwitchRecords time.Time
 
 	// Track logical clients keyed by user.clientID (runID fallback when raw clientID is empty).
 	clientRegistry *registry.ClientRegistry
@@ -839,49 +840,44 @@ func (svr *Service) serveWebsocketConn(ctx context.Context, c net.Conn, entry au
 	_ = c.SetDeadline(time.Now().Add(connReadTimeout))
 	ln := netpkg.NewWebsocketListener(newSingleConnListener(c))
 
-	acceptCh := make(chan net.Conn, 1)
-	errCh := make(chan error, 1)
+	done := make(chan struct{})
+	var (
+		wsConn    net.Conn
+		acceptErr error
+	)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			errCh <- err
-			return
-		}
-		acceptCh <- conn
+		wsConn, acceptErr = ln.Accept()
+		close(done)
 	}()
 
 	timer := time.NewTimer(connReadTimeout)
 	defer timer.Stop()
 
 	select {
-	case wsConn := <-acceptCh:
+	case <-done:
+		if acceptErr != nil {
+			_ = ln.Close()
+			log.Warnf("accept websocket connection error: %v", acceptErr)
+			c.Close()
+			return
+		}
 		_ = wsConn.SetDeadline(time.Time{})
 		_ = ln.Close()
 		svr.serveFrpConn(ctx, wsConn, false, entry)
-	case err := <-errCh:
-		_ = ln.Close()
-		log.Warnf("accept websocket connection error: %v", err)
-		c.Close()
 	case <-timer.C:
 		_ = ln.Close()
-		log.Warnf("accept websocket connection timeout")
-		c.Close()
-		select {
-		case wsConn := <-acceptCh:
-			if wsConn != nil {
-				_ = wsConn.Close()
-			}
-		default:
+		_ = c.Close()
+		<-done
+		if wsConn != nil {
+			_ = wsConn.Close()
 		}
+		log.Warnf("accept websocket connection timeout")
 	case <-ctx.Done():
 		_ = ln.Close()
-		c.Close()
-		select {
-		case wsConn := <-acceptCh:
-			if wsConn != nil {
-				_ = wsConn.Close()
-			}
-		default:
+		_ = c.Close()
+		<-done
+		if wsConn != nil {
+			_ = wsConn.Close()
 		}
 	}
 }
@@ -1073,49 +1069,46 @@ func (svr *Service) RegisterControl(
 	}
 
 	oldTransport := ""
-	now := time.Now()
-	svr.transportSwitchMu.Lock()
-	if svr.transportSwitchRecords == nil {
-		svr.transportSwitchRecords = make(map[string]transportSwitchRecord)
-	}
-	if len(svr.transportSwitchRecords) > 100 {
-		cooldown := max(time.Duration(svr.cfg.Transport.Auto.SwitchCooldownSec)*time.Second, 10*time.Minute)
-		for id, rec := range svr.transportSwitchRecords {
-			if now.Sub(rec.switchAt) > cooldown {
-				delete(svr.transportSwitchRecords, id)
+	if selectedTransport != "" {
+		svr.transportSwitchMu.Lock()
+		if svr.transportSwitchRecords == nil {
+			svr.transportSwitchRecords = make(map[string]transportSwitchRecord)
+		}
+		now := time.Now()
+		if now.Sub(svr.lastPruneSwitchRecords) > 5*time.Minute {
+			svr.lastPruneSwitchRecords = now
+			cooldown := max(time.Duration(svr.cfg.Transport.Auto.SwitchCooldownSec)*time.Second, 10*time.Minute)
+			for id, rec := range svr.transportSwitchRecords {
+				if svr.cfg.Transport.Auto.AllowDynamicSwitch != nil && !*svr.cfg.Transport.Auto.AllowDynamicSwitch {
+					continue
+				}
+				if now.Sub(rec.switchAt) > cooldown {
+					delete(svr.transportSwitchRecords, id)
+				}
 			}
 		}
-	}
 
-	record, hasRecord := svr.transportSwitchRecords[loginMsg.RunID]
-	if hasRecord {
-		oldTransport = record.transport
-	} else if oldCtl, ok := svr.ctlManager.GetByID(loginMsg.RunID); ok && oldCtl != nil && oldCtl.sessionCtx != nil {
-		oldTransport = oldCtl.sessionCtx.Transport
-	}
-
-	if oldTransport != "" && oldTransport != selectedTransport {
-		if svr.cfg.Transport.Auto.AllowDynamicSwitch != nil && !*svr.cfg.Transport.Auto.AllowDynamicSwitch {
-			svr.transportSwitchMu.Unlock()
-			return nil, fmt.Errorf("dynamic transport switch is disabled on server")
+		record, hasRecord := svr.transportSwitchRecords[loginMsg.RunID]
+		if hasRecord {
+			oldTransport = record.transport
+		} else if oldCtl, ok := svr.ctlManager.GetByID(loginMsg.RunID); ok && oldCtl != nil && oldCtl.sessionCtx != nil {
+			oldTransport = oldCtl.sessionCtx.Transport
 		}
-		if svr.cfg.Transport.Auto.SwitchCooldownSec > 0 && hasRecord {
-			if now.Sub(record.switchAt) < time.Duration(svr.cfg.Transport.Auto.SwitchCooldownSec)*time.Second {
+
+		if oldTransport != "" && oldTransport != selectedTransport {
+			if svr.cfg.Transport.Auto.AllowDynamicSwitch != nil && !*svr.cfg.Transport.Auto.AllowDynamicSwitch {
 				svr.transportSwitchMu.Unlock()
-				return nil, fmt.Errorf("transport switch cooldown active on server")
+				return nil, fmt.Errorf("dynamic transport switch is disabled on server")
+			}
+			if svr.cfg.Transport.Auto.SwitchCooldownSec > 0 && hasRecord {
+				if now.Sub(record.switchAt) < time.Duration(svr.cfg.Transport.Auto.SwitchCooldownSec)*time.Second {
+					svr.transportSwitchMu.Unlock()
+					return nil, fmt.Errorf("transport switch cooldown active on server")
+				}
 			}
 		}
-		svr.transportSwitchRecords[loginMsg.RunID] = transportSwitchRecord{
-			transport: selectedTransport,
-			switchAt:  now,
-		}
-	} else if !hasRecord {
-		svr.transportSwitchRecords[loginMsg.RunID] = transportSwitchRecord{
-			transport: selectedTransport,
-			switchAt:  now,
-		}
+		svr.transportSwitchMu.Unlock()
 	}
-	svr.transportSwitchMu.Unlock()
 
 	if err := svr.ctlManager.Add(ctl); err != nil {
 		return ctl, err
@@ -1128,6 +1121,15 @@ func (svr *Service) RegisterControl(
 	}
 	if !active {
 		return ctl, errControlReplaced
+	}
+
+	if selectedTransport != "" {
+		svr.transportSwitchMu.Lock()
+		svr.transportSwitchRecords[loginMsg.RunID] = transportSwitchRecord{
+			transport: selectedTransport,
+			switchAt:  time.Now(),
+		}
+		svr.transportSwitchMu.Unlock()
 	}
 
 	// for statistics

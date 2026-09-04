@@ -222,9 +222,24 @@ func TestValidateSelectedTransportRequiresMatchingConnectionEntry(t *testing.T) 
 	}
 }
 
-func TestValidateSelectedTransportRequiresAdvertisedAddrWhenSpecific(t *testing.T) {
+func TestAdvertisedAddrMatches(t *testing.T) {
+	if !advertisedAddrMatches("", "192.0.2.1") {
+		t.Fatal("expected empty advertised addr to match any selected addr")
+	}
+	if !advertisedAddrMatches("0.0.0.0", "192.0.2.1") {
+		t.Fatal("expected 0.0.0.0 advertised addr to match any selected addr")
+	}
+	if !advertisedAddrMatches("203.0.113.10", "203.0.113.10") {
+		t.Fatal("expected exact advertised addr to match")
+	}
+	if advertisedAddrMatches("203.0.113.10", "192.0.2.1") {
+		t.Fatal("expected different advertised addr not to match")
+	}
+}
+
+func TestValidateSelectedTransportAcceptsValidAdvertisedEndpoints(t *testing.T) {
 	cfg := &v1.ServerConfig{
-		BindAddr:     "203.0.113.10",
+		BindAddr:     "0.0.0.0",
 		BindPort:     7000,
 		KCPBindPort:  7000,
 		QUICBindPort: 7002,
@@ -232,11 +247,11 @@ func TestValidateSelectedTransportRequiresAdvertisedAddrWhenSpecific(t *testing.
 	cfg.Transport.Protocol = v1.TransportProtocolAuto
 	svr := newAutoTransportServiceForTest(t, cfg)
 
-	if err := svr.validateSelectedTransport(v1.TransportProtocolTCP, "203.0.113.10", 7000); err != nil {
-		t.Fatalf("expected tcp@203.0.113.10:7000 to be valid: %v", err)
+	if err := svr.validateSelectedTransport(v1.TransportProtocolTCP, "server.example.com", 7000); err != nil {
+		t.Fatalf("expected tcp@server.example.com:7000 to be valid: %v", err)
 	}
-	if err := svr.validateSelectedTransport(v1.TransportProtocolTCP, "192.0.2.1", 7000); err == nil {
-		t.Fatal("expected tcp@192.0.2.1:7000 to be rejected")
+	if err := svr.validateSelectedTransport(v1.TransportProtocolTCP, "server.example.com", 9999); err == nil {
+		t.Fatal("expected unadvertised port 9999 to be rejected")
 	}
 }
 
