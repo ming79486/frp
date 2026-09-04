@@ -719,7 +719,7 @@ func (ctl *Control) worker() {
 	}
 
 	ctl.serverMetrics.CloseClient()
-	ctl.serverMetrics.AutoTransportClientOffline(ctl.sessionCtx.Transport)
+	metrics.AutoTransportClientOffline(ctl.serverMetrics, ctl.sessionCtx.Transport)
 	if ctl.manager != nil {
 		ctl.manager.Remove(ctl)
 	} else if ctl.sessionCtx.ClientRegistry != nil {

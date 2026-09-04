@@ -94,36 +94,36 @@ func (m *serverMetrics) AddTrafficOut(name string, proxyType string, trafficByte
 
 func (m *serverMetrics) AutoNegotiation(success bool) {
 	for _, v := range m.ms {
-		v.AutoNegotiation(success)
+		metrics.AutoNegotiation(v, success)
 	}
 }
 
 func (m *serverMetrics) AutoTransportSelected(protocol string) {
 	for _, v := range m.ms {
-		v.AutoTransportSelected(protocol)
+		metrics.AutoTransportSelected(v, protocol)
 	}
 }
 
 func (m *serverMetrics) AutoTransportClientOnline(protocol string) {
 	for _, v := range m.ms {
-		v.AutoTransportClientOnline(protocol)
+		metrics.AutoTransportClientOnline(v, protocol)
 	}
 }
 
 func (m *serverMetrics) AutoTransportClientOffline(protocol string) {
 	for _, v := range m.ms {
-		v.AutoTransportClientOffline(protocol)
+		metrics.AutoTransportClientOffline(v, protocol)
 	}
 }
 
 func (m *serverMetrics) AutoTransportSwitch(oldProtocol string, newProtocol string) {
 	for _, v := range m.ms {
-		v.AutoTransportSwitch(oldProtocol, newProtocol)
+		metrics.AutoTransportSwitch(v, oldProtocol, newProtocol)
 	}
 }
 
 func (m *serverMetrics) AutoTransportRejected(protocol string) {
 	for _, v := range m.ms {
-		v.AutoTransportRejected(protocol)
+		metrics.AutoTransportRejected(v, protocol)
 	}
 }

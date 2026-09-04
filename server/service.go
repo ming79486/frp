@@ -453,6 +453,7 @@ func (svr *Service) Close() error {
 }
 
 func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, internal bool, entry autoTransportEntry) {
+	conn = netpkg.NewContextConn(ctx, conn)
 	xl := xlog.FromContextSafe(ctx)
 
 	acceptedConn, err := svr.acceptConnection(ctx, conn)
@@ -467,7 +468,7 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 		if err := validateClientAutoVersion(m.ClientAutoVersion); err != nil {
 			xl.Warnf("select transport version error: %v", err)
 			svr.logRejectedTransport(m.Protocol, m.Port, err)
-			metrics.Server.AutoTransportRejected(m.Protocol)
+			metrics.AutoTransportRejected(metrics.Server, m.Protocol)
 			_ = acceptedConn.conn.WriteMsg(&msg.LoginResp{
 				Version: version.Full(),
 				Error:   util.GenerateResponseErrorString("select transport error", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
@@ -478,7 +479,7 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 		if err := svr.validateSelectedTransportForEntry(m.Protocol, m.Addr, m.Port, entry); err != nil {
 			xl.Warnf("select transport error: %v", err)
 			svr.logRejectedTransport(m.Protocol, m.Port, err)
-			metrics.Server.AutoTransportRejected(m.Protocol)
+			metrics.AutoTransportRejected(metrics.Server, m.Protocol)
 			_ = acceptedConn.conn.WriteMsg(&msg.LoginResp{
 				Version: version.Full(),
 				Error:   util.GenerateResponseErrorString("select transport error", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
@@ -524,19 +525,19 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 				}
 			}
 			if err == nil {
-				ctl, err = svr.RegisterControl(
-					controlConn,
-					m,
-					internal,
-					acceptedConn.wireProtocol,
-					acceptedConn.udpPacketCodec,
-					AutoTransportControlOptions{
-						SelectedTransport: acceptedConn.selectedTransport,
-						SelectedPort:      acceptedConn.selectedPort,
-						SelectedReason:    acceptedConn.selectedReason,
-						SelectedScores:    acceptedConn.selectedScores,
-					},
-				)
+				if acceptedConn.selectedTransport != "" {
+					autoCtx := NewContextWithAutoTransport(
+						controlConn.Context(),
+						&AutoTransportMetadata{
+							SelectedTransport: acceptedConn.selectedTransport,
+							SelectedPort:      acceptedConn.selectedPort,
+							SelectedReason:    acceptedConn.selectedReason,
+							SelectedScores:    acceptedConn.selectedScores,
+						},
+					)
+					controlConn.WithContext(autoCtx)
+				}
+				ctl, err = svr.RegisterControl(controlConn, m, internal, acceptedConn.wireProtocol, acceptedConn.udpPacketCodec)
 			}
 		}
 
@@ -958,33 +959,13 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 	}
 }
 
-type AutoTransportControlOptions struct {
-	SelectedTransport string
-	SelectedPort      int
-	SelectedReason    string
-	SelectedScores    map[string]int64
-}
-
 func (svr *Service) RegisterControl(
 	ctlConn *msg.Conn,
 	loginMsg *msg.Login,
 	internal bool,
 	wireProtocol string,
 	udpPacketCodec string,
-	autoOpts ...AutoTransportControlOptions,
 ) (*Control, error) {
-	var (
-		selectedTransport string
-		selectedPort      int
-		selectedReason    string
-		selectedScores    map[string]int64
-	)
-	if len(autoOpts) > 0 {
-		selectedTransport = autoOpts[0].SelectedTransport
-		selectedPort = autoOpts[0].SelectedPort
-		selectedReason = autoOpts[0].SelectedReason
-		selectedScores = autoOpts[0].SelectedScores
-	}
 	switch wireProtocol {
 	case wire.ProtocolV1:
 		if udpPacketCodec != "" {
@@ -1011,6 +992,18 @@ func (svr *Service) RegisterControl(
 	}
 
 	ctx := netpkg.NewContextFromConn(ctlConn)
+	var (
+		selectedTransport string
+		selectedPort      int
+		selectedReason    string
+		selectedScores    map[string]int64
+	)
+	if meta, ok := AutoTransportFromContext(ctx); ok && meta != nil {
+		selectedTransport = meta.SelectedTransport
+		selectedPort = meta.SelectedPort
+		selectedReason = meta.SelectedReason
+		selectedScores = meta.SelectedScores
+	}
 	xl := xlog.FromContextSafe(ctx)
 	xl.AppendPrefix(loginMsg.RunID)
 	ctx = xlog.NewContext(ctx, xl)
@@ -1065,9 +1058,9 @@ func (svr *Service) RegisterControl(
 	}
 
 	// for statistics
-	metrics.Server.AutoTransportSelected(selectedTransport)
-	metrics.Server.AutoTransportClientOnline(selectedTransport)
-	metrics.Server.AutoTransportSwitch(oldTransport, selectedTransport)
+	metrics.AutoTransportSelected(metrics.Server, selectedTransport)
+	metrics.AutoTransportClientOnline(metrics.Server, selectedTransport)
+	metrics.AutoTransportSwitch(metrics.Server, oldTransport, selectedTransport)
 	svr.logSelectedTransport(loginMsg.RunID, selectedTransport, selectedPort, selectedReason, selectedScores)
 	svr.logTransportSwitch(loginMsg.RunID, oldTransport, selectedTransport, selectedReason, selectedScores)
 

@@ -581,12 +581,6 @@ func (*countingServerMetrics) OpenConnection(string, string)           {}
 func (*countingServerMetrics) CloseConnection(string, string)          {}
 func (*countingServerMetrics) AddTrafficIn(string, string, int64)      {}
 func (*countingServerMetrics) AddTrafficOut(string, string, int64)     {}
-func (*countingServerMetrics) AutoNegotiation(bool)                    {}
-func (*countingServerMetrics) AutoTransportSelected(string)            {}
-func (*countingServerMetrics) AutoTransportClientOnline(string)        {}
-func (*countingServerMetrics) AutoTransportClientOffline(string)       {}
-func (*countingServerMetrics) AutoTransportSwitch(string, string)      {}
-func (*countingServerMetrics) AutoTransportRejected(string)            {}
 
 func (m *countingServerMetrics) newClients() int64 {
 	m.mu.Lock()

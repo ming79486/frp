@@ -15,6 +15,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -28,6 +29,27 @@ import (
 	"github.com/fatedier/frp/pkg/util/log"
 	"github.com/fatedier/frp/server/metrics"
 )
+
+type autoTransportContextKey struct{}
+
+type AutoTransportMetadata struct {
+	SelectedTransport string
+	SelectedPort      int
+	SelectedReason    string
+	SelectedScores    map[string]int64
+}
+
+func NewContextWithAutoTransport(ctx context.Context, meta *AutoTransportMetadata) context.Context {
+	return context.WithValue(ctx, autoTransportContextKey{}, meta)
+}
+
+func AutoTransportFromContext(ctx context.Context) (*AutoTransportMetadata, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	meta, ok := ctx.Value(autoTransportContextKey{}).(*AutoTransportMetadata)
+	return meta, ok
+}
 
 type autoTransportEntry struct {
 	Protocols []string
@@ -122,7 +144,7 @@ func (svr *Service) handleClientHelloAuto(conn net.Conn, m *msg.ClientHelloAuto)
 		resp.Error = fmt.Sprintf("auto transport auth failed: %v", err)
 		resp.AutoEnabled = false
 	}
-	metrics.Server.AutoNegotiation(resp.Error == "" && resp.AutoEnabled)
+	metrics.AutoNegotiation(metrics.Server, resp.Error == "" && resp.AutoEnabled)
 	_ = msg.WriteMsg(conn, resp)
 	_ = conn.Close()
 }
