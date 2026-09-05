@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/msg"
 	splugin "github.com/fatedier/frp/pkg/plugin/server"
+	"github.com/fatedier/frp/pkg/proto/wire"
 )
 
 func newAutoTransportServiceForTest(t *testing.T, cfg *v1.ServerConfig) *Service {
@@ -79,7 +81,7 @@ func readServerHelloFromHandler(t *testing.T, svr *Service, hello *msg.ClientHel
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		svr.handleClientHelloAuto(serverConn, hello)
+		svr.handleClientHelloAuto(msg.NewConn(serverConn, msg.NewV1ReadWriter(serverConn)), hello)
 	}()
 
 	var resp msg.ServerHelloAuto
@@ -107,7 +109,7 @@ func readProbeRespFromHandler(
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		svr.handleProbeTransport(serverConn, probe, entry)
+		svr.handleProbeTransport(msg.NewConn(serverConn, msg.NewV1ReadWriter(serverConn)), probe, entry)
 	}()
 
 	var resp msg.ProbeTransportResp
@@ -455,5 +457,78 @@ func TestClientHelloAutoRejectsUnsupportedVersion(t *testing.T) {
 	}
 	if resp.AutoEnabled {
 		t.Fatal("expected auto transport to be disabled in failed version response")
+	}
+}
+
+func TestAutoTransportV2ResponsesUseNegotiatedWire(t *testing.T) {
+	cfg := &v1.ServerConfig{BindPort: 7000}
+	cfg.Auth.Token = "secret"
+	cfg.Transport.Protocol = v1.TransportProtocolAuto
+	svr := newAutoTransportServiceForTest(t, cfg)
+	for _, probe := range []bool{false, true} {
+		t.Run(fmt.Sprintf("probe=%v", probe), func(t *testing.T) {
+			serverConn, clientConn := net.Pipe()
+			defer clientConn.Close()
+			defer serverConn.Close()
+			_ = clientConn.SetDeadline(time.Now().Add(time.Second))
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				svr.handleConnection(context.Background(), serverConn, false, autoTransportEntry{Protocols: []string{v1.TransportProtocolTCP}, Port: 7000})
+			}()
+			if err := wire.WriteMagic(clientConn); err != nil {
+				t.Fatal(err)
+			}
+			rw := msg.NewV2ReadWriterWithConn(wire.NewConn(clientConn))
+			hello := validAutoClientHello(t)
+			var request msg.Message = hello
+			if probe {
+				request = &msg.ProbeTransport{
+					Protocol:          v1.TransportProtocolTCP,
+					Port:              7000,
+					ClientAutoVersion: msg.AutoTransportVersion,
+					PrivilegeKey:      hello.PrivilegeKey,
+					Timestamp:         hello.Timestamp,
+				}
+			}
+			if err := rw.WriteMsg(request); err != nil {
+				t.Fatal(err)
+			}
+			response, err := rw.ReadMsg()
+			if err != nil {
+				t.Fatalf("read v2 auto response: %v", err)
+			}
+			if probe {
+				resp, ok := response.(*msg.ProbeTransportResp)
+				if !ok || resp.Error != "" {
+					t.Fatalf("unexpected probe response: %+v", response)
+				}
+			} else {
+				resp, ok := response.(*msg.ServerHelloAuto)
+				if !ok || !resp.AutoEnabled || resp.Error != "" {
+					t.Fatalf("unexpected hello response: %+v", response)
+				}
+			}
+			<-done
+		})
+	}
+}
+
+func TestServeWebsocketConnCancellationUnblocksAccept(t *testing.T) {
+	svr := newAutoTransportServiceForTest(t, &v1.ServerConfig{BindPort: 7000})
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svr.serveWebsocketConn(ctx, serverConn, autoTransportEntry{})
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled WSS handshake left Accept blocked")
 	}
 }

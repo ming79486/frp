@@ -135,7 +135,7 @@ func autoTransportErrorString(summary string, err error, detailed bool) string {
 	return fmt.Sprintf("%s: %v", summary, err)
 }
 
-func (svr *Service) handleClientHelloAuto(conn net.Conn, m *msg.ClientHelloAuto) {
+func (svr *Service) handleClientHelloAuto(conn *msg.Conn, m *msg.ClientHelloAuto) {
 	resp := &msg.ServerHelloAuto{
 		ProtocolMode:       svr.cfg.Transport.Protocol,
 		AutoEnabled:        svr.autoTransportEnabled(),
@@ -152,11 +152,11 @@ func (svr *Service) handleClientHelloAuto(conn net.Conn, m *msg.ClientHelloAuto)
 		resp.AutoEnabled = false
 	}
 	metrics.AutoNegotiation(metrics.Server, resp.Error == "" && resp.AutoEnabled)
-	_ = msg.WriteMsg(conn, resp)
+	_ = writeWithDeadline(conn, connWriteTimeout, func() error { return conn.WriteMsg(resp) })
 	_ = conn.Close()
 }
 
-func (svr *Service) handleProbeTransport(conn net.Conn, m *msg.ProbeTransport, entry autoTransportEntry) {
+func (svr *Service) handleProbeTransport(conn *msg.Conn, m *msg.ProbeTransport, entry autoTransportEntry) {
 	resp := &msg.ProbeTransportResp{
 		Protocol:          m.Protocol,
 		Port:              m.Port,
@@ -169,7 +169,7 @@ func (svr *Service) handleProbeTransport(conn net.Conn, m *msg.ProbeTransport, e
 	} else if err := svr.validateSelectedTransportForEntry(m.Protocol, m.Addr, m.Port, entry); err != nil {
 		resp.Error = err.Error()
 	}
-	_ = msg.WriteMsg(conn, resp)
+	_ = writeWithDeadline(conn, connWriteTimeout, func() error { return conn.WriteMsg(resp) })
 	_ = conn.Close()
 }
 

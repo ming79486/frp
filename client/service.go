@@ -295,7 +295,20 @@ func (svr *Service) Run(ctx context.Context) error {
 }
 
 func (svr *Service) keepControllerWorking() {
-	<-svr.ctl.Done()
+	svr.ctlMu.RLock()
+	ctl := svr.ctl
+	svr.ctlMu.RUnlock()
+	if ctl == nil {
+		return
+	}
+	select {
+	case <-svr.ctx.Done():
+		return
+	case <-ctl.Done():
+	}
+	if svr.ctx.Err() != nil {
+		return
+	}
 
 	// There is a situation where the login is successful but due to certain reasons,
 	// the control immediately exits. It is necessary to limit the frequency of reconnection in this case.
@@ -305,8 +318,11 @@ func (svr *Service) keepControllerWorking() {
 		// loopLoginUntilSuccess is another layer of loop that will continuously attempt to
 		// login to the server until successful.
 		svr.loopLoginUntilSuccess(20*time.Second, false, autoTransportReasonControlClosed)
-		if svr.ctl != nil {
-			<-svr.ctl.Done()
+		svr.ctlMu.RLock()
+		ctl := svr.ctl
+		svr.ctlMu.RUnlock()
+		if ctl != nil {
+			<-ctl.Done()
 			return false, errors.New("control is closed and try another loop")
 		}
 		// If the control is nil, it means that the login failed and the service is also closed.
@@ -380,6 +396,11 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 		ctl.Run(proxyCfgs, visitorCfgs)
 		// close and replace previous control
 		svr.ctlMu.Lock()
+		if svr.ctx.Err() != nil {
+			svr.ctlMu.Unlock()
+			ctl.Close()
+			return false, svr.ctx.Err()
+		}
 		if svr.ctl != nil {
 			svr.ctl.Close()
 		}

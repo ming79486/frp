@@ -37,6 +37,7 @@ import (
 	"github.com/fatedier/frp/pkg/msg"
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/pkg/proto/wire"
+	netpkg "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/server/controller"
 	"github.com/fatedier/frp/server/proxy"
@@ -974,3 +975,17 @@ func (*countingCloseConn) RemoteAddr() net.Addr             { return lifecycleTe
 func (*countingCloseConn) SetDeadline(time.Time) error      { return nil }
 func (*countingCloseConn) SetReadDeadline(time.Time) error  { return nil }
 func (*countingCloseConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestAutoTransportReconnectPreservesSwitchCooldown(t *testing.T) {
+	svr := newControlTestService(t)
+	svr.cfg.Transport.Auto.SwitchCooldownSec = 300
+	oldSwitch := time.Now().Add(-6 * time.Minute)
+	svr.transportSwitchRecords = map[string]transportSwitchRecord{"shared-run": {transport: v1.TransportProtocolTCP, switchAt: oldSwitch}}
+	conn := newDeadlineReadConn()
+	ctx := NewContextWithAutoTransport(context.Background(), &AutoTransportMetadata{SelectedTransport: v1.TransportProtocolTCP})
+	msgConn := msg.NewConn(netpkg.NewContextConn(ctx, conn), msg.NewV1ReadWriter(conn))
+	ctl, err := svr.RegisterControl(msgConn, &msg.Login{RunID: "shared-run", ClientSpec: msg.ClientSpec{AlwaysAuthPass: true}}, true, wire.ProtocolV1, "")
+	require.NoError(t, err)
+	defer ctl.Close()
+	require.Equal(t, oldSwitch, svr.transportSwitchRecords["shared-run"].switchAt, "same-transport reconnect must not restart switch cooldown")
+}

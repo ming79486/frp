@@ -16,6 +16,7 @@ package client_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -257,10 +258,12 @@ func runAutoTransportIntegration(t *testing.T, cfg autoTransportIntegrationConfi
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	time.Sleep(100 * time.Millisecond)
 	clientCancel()
+	clientSvc.Close()
 	select {
 	case err := <-done:
-		if err != nil {
+		if err != nil && !errors.Is(err, context.Canceled) {
 			t.Fatalf("client run returned error: %v", err)
 		}
 	case <-time.After(3 * time.Second):

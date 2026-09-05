@@ -1000,3 +1000,88 @@ func TestAutoTransportHeartbeatRTTDegradation(t *testing.T) {
 		t.Fatalf("expected two quality degrade events, got %d", status.QualityDegradeCount)
 	}
 }
+
+func TestAutoTransportBootstrapBoundsBlockedWrite(t *testing.T) {
+	common := &v1.ClientCommonConfig{}
+	common.Transport.Protocol = v1.TransportProtocolAuto
+	common.Transport.Auto.ProbeTimeoutMs = 30
+	if err := common.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	clientAuth, err := auth.BuildClientAuth(&common.Auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	manager := newAutoTransportManager(common, clientAuth, func(_ context.Context, cfg *v1.ClientCommonConfig) Connector {
+		return &scriptedConnector{cfg: cfg, handler: func(_ *v1.ClientCommonConfig, conn net.Conn) {
+			defer conn.Close()
+			<-release
+		}}
+	})
+	done := make(chan error, 1)
+	go func() { _, err := manager.bootstrap(context.Background()); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected bootstrap timeout")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bootstrap write exceeded probe timeout")
+	}
+}
+
+func TestAutoTransportRecheckRespectsNegotiatedPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name                           string
+		dynamic, allowUDP, blacklisted bool
+		want                           bool
+	}{
+		{name: "fixed mode", allowUDP: true},
+		{name: "udp disabled", dynamic: true},
+		{name: "preferred blacklisted", dynamic: true, allowUDP: true, blacklisted: true},
+		{name: "eligible preferred", dynamic: true, allowUDP: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			common := &v1.ClientCommonConfig{}
+			if err := common.Complete(); err != nil {
+				t.Fatal(err)
+			}
+			common.Transport.Auto.Candidates = []string{v1.TransportProtocolQUIC, v1.TransportProtocolTCP}
+			common.Transport.Auto.AllowUDP = lo.ToPtr(tc.allowUDP)
+			manager := newAutoTransportManager(common, nil, nil)
+			manager.selected = &autoTransportCandidate{Protocol: v1.TransportProtocolTCP}
+			manager.state = autoTransportStateConnected
+			manager.serverAutoEnabled = true
+			manager.lastDynamic = tc.dynamic
+			manager.advertisedTransports = []string{v1.TransportProtocolQUIC, v1.TransportProtocolTCP}
+			if tc.blacklisted {
+				manager.blacklistUntil[v1.TransportProtocolQUIC] = time.Now().Add(time.Hour)
+			}
+			if got := manager.shouldRecheck(); got != tc.want {
+				t.Fatalf("shouldRecheck = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAutoTransportHeartbeatDoesNotEraseWorkConnectionFailures(t *testing.T) {
+	common := &v1.ClientCommonConfig{}
+	if err := common.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	common.Transport.Auto.DegradeThreshold = 1
+	common.Transport.Auto.FailureThreshold = 2
+	manager := newAutoTransportManager(common, nil, nil)
+	manager.selected = &autoTransportCandidate{Protocol: v1.TransportProtocolTCP}
+	manager.reportLoginSuccess(v1.TransportProtocolTCP)
+	manager.reportWorkConnFailure("")
+	manager.reportLoginSuccess(v1.TransportProtocolTCP)
+	manager.reportHeartbeatRTT(10 * time.Millisecond)
+	manager.reportHeartbeatRTT(10 * time.Millisecond)
+	manager.reportWorkConnFailure("")
+	if !manager.isBlacklisted(v1.TransportProtocolTCP) {
+		t.Fatal("healthy control heartbeats erased repeated work connection failures")
+	}
+}

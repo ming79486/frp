@@ -347,9 +347,6 @@ func (m *autoTransportManager) reportHeartbeatRTT(rtt time.Duration) bool {
 	if rtt < baseline*2 {
 		m.baselineHeartbeatRTT = (m.baselineHeartbeatRTT*4 + rtt) / 5
 		m.qualityDegradeCount = 0
-		if m.selected != nil {
-			m.failures[m.selected.Protocol] = 0
-		}
 	}
 	if m.state == autoTransportStateDegraded && m.heartbeatTimeouts == 0 && m.workConnFailures == 0 {
 		m.state = autoTransportStateConnected
@@ -506,6 +503,11 @@ func (m *autoTransportManager) bootstrap(ctx context.Context) (*msg.ServerHelloA
 		return nil, err
 	}
 	defer conn.Close()
+	if deadline, ok := doCtx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	stop := context.AfterFunc(doCtx, func() { _ = conn.Close() })
+	defer stop()
 
 	hello := &msg.ClientHelloAuto{
 		ProtocolMode:       v1.TransportProtocolAuto,
@@ -524,7 +526,6 @@ func (m *autoTransportManager) bootstrap(ctx context.Context) (*msg.ServerHelloA
 	if err := msg.WriteMsg(conn, hello); err != nil {
 		return nil, err
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	var resp msg.ServerHelloAuto
 	if err := msg.ReadMsgInto(conn, &resp); err != nil {
 		return nil, err
@@ -775,7 +776,7 @@ func (m *autoTransportManager) shouldRecheck() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.state != autoTransportStateConnected || m.selected == nil || !m.serverAutoEnabled {
+	if m.state != autoTransportStateConnected || m.selected == nil || !m.serverAutoEnabled || !m.lastDynamic {
 		return false
 	}
 	if !m.selectedAt.IsZero() && time.Since(m.selectedAt) < time.Duration(m.common.Transport.Auto.StickyDurationSec)*time.Second {
@@ -790,7 +791,9 @@ func (m *autoTransportManager) shouldRecheck() bool {
 	}
 	// Check if a higher-priority candidate was restored or available on server
 	if len(m.common.Transport.Auto.Candidates) > 0 && m.selected.Protocol != m.common.Transport.Auto.Candidates[0] {
-		if len(m.advertisedTransports) > 0 && slices.Contains(m.advertisedTransports, m.common.Transport.Auto.Candidates[0]) {
+		preferred := m.common.Transport.Auto.Candidates[0]
+		if slices.Contains(m.clientCandidates(), preferred) && (m.allowUDP() || !isUDPTransportProtocol(preferred)) &&
+			!m.isBlacklisted(preferred) && slices.Contains(m.advertisedTransports, preferred) {
 			return true
 		}
 	}

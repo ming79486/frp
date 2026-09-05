@@ -120,6 +120,8 @@ type Service struct {
 	// Manage all plugins
 	pluginManager *plugin.Manager
 
+	closeOnce sync.Once
+
 	// HTTP vhost router
 	httpVhostRouter *vhost.Routers
 
@@ -257,7 +259,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	}()
 	ln = svr.muxer.DefaultListener()
 
-	svr.listener = ln
+	svr.listener = newSyncListener(ln)
 	log.Infof("frps tcp listen on %s", address)
 
 	// Listen for accepting connections from client using kcp protocol.
@@ -424,36 +426,40 @@ func (svr *Service) Run(ctx context.Context) {
 }
 
 func (svr *Service) Close() error {
-	if svr.kcpListener != nil {
-		svr.kcpListener.Close()
-	}
-	if svr.quicListener != nil {
-		svr.quicListener.Close()
-	}
-	if svr.websocketListener != nil {
-		svr.websocketListener.Close()
-	}
-	if svr.tlsListener != nil {
-		svr.tlsListener.Close()
-	}
-	if svr.sshTunnelListener != nil {
-		svr.sshTunnelListener.Close()
-	}
-	if svr.listener != nil {
-		svr.listener.Close()
-	}
-	if svr.webServer != nil {
-		svr.webServer.Close()
-	}
-	if svr.sshTunnelGateway != nil {
-		svr.sshTunnelGateway.Close()
-	}
-	svr.rc.Close()
-	svr.muxer.Close()
-	svr.ctlManager.Close()
-	if svr.cancel != nil {
-		svr.cancel()
-	}
+	svr.closeOnce.Do(func() {
+		if svr.cancel != nil {
+			svr.cancel()
+		}
+		if svr.muxer != nil {
+			svr.muxer.Close()
+		}
+		if svr.kcpListener != nil {
+			svr.kcpListener.Close()
+		}
+		if svr.quicListener != nil {
+			svr.quicListener.Close()
+		}
+		if svr.websocketListener != nil {
+			svr.websocketListener.Close()
+		}
+		if svr.tlsListener != nil {
+			svr.tlsListener.Close()
+		}
+		if svr.sshTunnelListener != nil {
+			svr.sshTunnelListener.Close()
+		}
+		if svr.listener != nil {
+			svr.listener.Close()
+		}
+		if svr.webServer != nil {
+			svr.webServer.Close()
+		}
+		if svr.sshTunnelGateway != nil {
+			svr.sshTunnelGateway.Close()
+		}
+		svr.rc.Close()
+		svr.ctlManager.Close()
+	})
 	return nil
 }
 
@@ -508,9 +514,9 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 
 	switch m := acceptedConn.firstMsg.(type) {
 	case *msg.ClientHelloAuto:
-		svr.handleClientHelloAuto(conn, m)
+		svr.handleClientHelloAuto(acceptedConn.conn, m)
 	case *msg.ProbeTransport:
-		svr.handleProbeTransport(conn, m, entry)
+		svr.handleProbeTransport(acceptedConn.conn, m, entry)
 	case *msg.Login:
 		// server plugin hook
 		content := &plugin.LoginContent{
@@ -770,27 +776,30 @@ func (svr *Service) HandleListener(l net.Listener, internal bool, entry autoTran
 			log.Warnf("listener for incoming connections from client closed")
 			return
 		}
-		// inject xlog object into net.Conn context
-		xl := xlog.New()
-		ctx := context.Background()
 
-		c = netpkg.NewContextConn(xlog.NewContext(ctx, xl), c)
+		go func(c net.Conn) {
+			// inject xlog object into net.Conn context
+			xl := xlog.New()
+			ctx := context.Background()
 
-		if !internal {
-			log.Tracef("start check TLS connection...")
-			originConn := c
-			forceTLS := svr.cfg.Transport.TLS.Force
-			var isTLS, custom bool
-			c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, connReadTimeout)
-			if err != nil {
-				log.Warnf("checkAndEnableTLSServerConnWithTimeout error: %v", err)
-				originConn.Close()
-				continue
+			c = netpkg.NewContextConn(xlog.NewContext(ctx, xl), c)
+
+			if !internal {
+				log.Tracef("start check TLS connection...")
+				originConn := c
+				forceTLS := svr.cfg.Transport.TLS.Force
+				var isTLS, custom bool
+				c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, connReadTimeout)
+				if err != nil {
+					log.Warnf("checkAndEnableTLSServerConnWithTimeout error: %v", err)
+					originConn.Close()
+					return
+				}
+				log.Tracef("check TLS connection success, isTLS: %v custom: %v internal: %v", isTLS, custom, internal)
 			}
-			log.Tracef("check TLS connection success, isTLS: %v custom: %v internal: %v", isTLS, custom, internal)
-		}
 
-		go svr.serveFrpConn(ctx, c, internal, entry)
+			svr.serveFrpConn(ctx, c, internal, entry)
+		}(c)
 	}
 }
 
@@ -802,21 +811,23 @@ func (svr *Service) HandleTLSListener(l net.Listener) {
 			return
 		}
 
-		xl := xlog.New()
-		ctx := context.Background()
-		c = netpkg.NewContextConn(xlog.NewContext(ctx, xl), c)
+		go func(c net.Conn) {
+			xl := xlog.New()
+			ctx := context.Background()
+			c = netpkg.NewContextConn(xlog.NewContext(ctx, xl), c)
 
-		log.Tracef("start check TLS connection...")
-		originConn := c
-		c, isTLS, custom, err := netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, true, connReadTimeout)
-		if err != nil {
-			log.Warnf("checkAndEnableTLSServerConnWithTimeout error: %v", err)
-			originConn.Close()
-			continue
-		}
-		log.Tracef("check TLS connection success, isTLS: %v custom: %v internal: false", isTLS, custom)
+			log.Tracef("start check TLS connection...")
+			originConn := c
+			c, isTLS, custom, err := netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, true, connReadTimeout)
+			if err != nil {
+				log.Warnf("checkAndEnableTLSServerConnWithTimeout error: %v", err)
+				originConn.Close()
+				return
+			}
+			log.Tracef("check TLS connection success, isTLS: %v custom: %v internal: false", isTLS, custom)
 
-		go svr.serveTLSFrpConn(ctx, c)
+			svr.serveTLSFrpConn(ctx, c)
+		}(c)
 	}
 }
 
@@ -1125,9 +1136,11 @@ func (svr *Service) RegisterControl(
 
 	if selectedTransport != "" {
 		svr.transportSwitchMu.Lock()
-		svr.transportSwitchRecords[loginMsg.RunID] = transportSwitchRecord{
-			transport: selectedTransport,
-			switchAt:  time.Now(),
+		if record, ok := svr.transportSwitchRecords[loginMsg.RunID]; !ok || record.transport != selectedTransport {
+			svr.transportSwitchRecords[loginMsg.RunID] = transportSwitchRecord{
+				transport: selectedTransport,
+				switchAt:  time.Now(),
+			}
 		}
 		svr.transportSwitchMu.Unlock()
 	}
@@ -1209,4 +1222,33 @@ func (svr *Service) RegisterVisitorConn(visitorConn net.Conn, newMsg *msg.NewVis
 		return nil
 	}
 	return admit("", wireProtocol, "")
+}
+
+type syncListener struct {
+	net.Listener
+	mu         sync.Mutex
+	lastAccept time.Time
+}
+
+func newSyncListener(l net.Listener) net.Listener {
+	if l == nil {
+		return nil
+	}
+	return &syncListener{Listener: l}
+}
+
+func (s *syncListener) Accept() (net.Conn, error) {
+	conn, err := s.Listener.Accept()
+	if err == nil {
+		s.mu.Lock()
+		s.lastAccept = time.Now()
+		s.mu.Unlock()
+	}
+	return conn, err
+}
+
+func (s *syncListener) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Listener.Close()
 }
