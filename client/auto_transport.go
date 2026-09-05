@@ -956,12 +956,13 @@ func (m *autoTransportManager) probeOnce(ctx context.Context, candidate autoTran
 		conn = res.conn
 	}
 	defer conn.Close()
-
 	if deadline, ok := doCtx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
 		_ = conn.SetDeadline(time.Now().Add(timeout))
 	}
+	stop := context.AfterFunc(doCtx, func() { _ = conn.Close() })
+	defer stop()
 	probe := &msg.ProbeTransport{
 		Protocol:          candidate.Protocol,
 		Addr:              candidate.advertisedAddr(),

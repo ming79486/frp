@@ -1085,3 +1085,46 @@ func TestAutoTransportHeartbeatDoesNotEraseWorkConnectionFailures(t *testing.T) 
 		t.Fatal("healthy control heartbeats erased repeated work connection failures")
 	}
 }
+
+func TestAutoTransportProbeBoundsBlockedWrite(t *testing.T) {
+	common := &v1.ClientCommonConfig{}
+	common.Transport.Protocol = v1.TransportProtocolAuto
+	common.Transport.Auto.ProbeTimeoutMs = 30
+	common.Transport.Auto.ProbeCount = 1
+	if err := common.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	clientAuth, err := auth.BuildClientAuth(&common.Auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	manager := newAutoTransportManager(common, clientAuth, func(_ context.Context, cfg *v1.ClientCommonConfig) Connector {
+		return &scriptedConnector{cfg: cfg, handler: func(_ *v1.ClientCommonConfig, conn net.Conn) {
+			defer conn.Close()
+			<-release
+		}}
+	})
+	candidate := autoTransportCandidate{
+		Protocol: v1.TransportProtocolTCP,
+		Addr:     "127.0.0.1",
+		Port:     7000,
+	}
+	done := make(chan time.Duration, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		rtt, err := manager.probeOnce(context.Background(), candidate)
+		done <- rtt
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected probe timeout error")
+		}
+		<-done
+	case <-time.After(time.Second):
+		t.Fatal("probe write exceeded probe timeout")
+	}
+}

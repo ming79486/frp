@@ -5,6 +5,12 @@ set -eu
 SCRIPT=$(readlink -f "$0")
 ROOT=$(unset CDPATH && cd "$(dirname "$SCRIPT")/.." && pwd)
 
+GOPATH_BIN="$(go env GOPATH)/bin"
+case ":${PATH}:" in
+    *:"${GOPATH_BIN}":*) ;;
+    *) export PATH="${PATH}:${GOPATH_BIN}" ;;
+esac
+
 if ! command -v ginkgo >/dev/null 2>&1; then
     echo "ginkgo not found, try to install..."
     go install github.com/onsi/ginkgo/v2/ginkgo@v2.23.4
